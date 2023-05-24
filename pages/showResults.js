@@ -108,9 +108,11 @@ function getAssetValue(currentPrice, initialPrice, initialInvestment) {
 The ShowResults component
 */
 const ShowResults = ({ portfolio=samplePortfolio }) => {
+  const [isLoading, setIsLoading] = useState(false);
   const [chartLoaded, setChartLoaded] = useState(false);
   const [chartSeries, setChartSeries] = useState(null);
   const [finalTotalValue, setFinalTotalValue] = useState(0);
+  const [finalStockValues, setFinalStockValues] = useState(new Map());
 
   const chartOptions = {
     chart: {
@@ -118,10 +120,32 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
     },
     xaxis: {
       type: "datetime",
-    }
+    },
+    yaxis: {
+      labels: {
+        formatter: function(value, index) {
+          return '$' + value.toFixed(2);
+        }
+      }
+    },
+    // https://apexcharts.com/javascript-chart-demos/bar-charts/custom-datalabels/
+    dataLabels: {
+      enabled: false,
+      // textAnchor: "start",
+      // formatter: function(val, opt) {
+      //   //console.log(opt);
+      //   return (opt.dataPointIndex == 0) ? opt.w.globals.seriesNames[opt.seriesIndex] : "";
+      // }
+    },
+    // tooltip: {
+    //   shared: false,
+    //   intersect: false
+    // }
+
   };
 
   async function updateChart() {
+    setIsLoading(true);
     // Get the stock data from the Marketstack API
     const stockSymbols = portfolio.assets.map((asset) => asset.symbol);
     const startDate = portfolio.startDate;
@@ -153,7 +177,7 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
     d.forEach((datum) => {
       const date = datum.date;
       const symbol = datum.symbol;
-      const closingPrice = datum.close;
+      const closingPrice = datum.adj_close;
 
       if(!initialPrices.has(symbol))
         initialPrices.set(symbol, closingPrice);
@@ -194,30 +218,67 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
     });
 
     setChartSeries(newChartSeries);
+
     setFinalTotalValue(totalValue[totalValue.length-1].value);
+    setFinalStockValues(stockSymbols.map((symbol) => {
+      const values = valueData.get(symbol);
+      return {
+        symbol: symbol,
+        value: values[values.length-1].value
+      };
+    }));
+
     setChartLoaded(true);
+    setIsLoading(false);
+
+
   } 
 
   return (
-    <div>
-      {(chartLoaded && chartOptions && chartSeries) && 
-        <div>
-          <Chart
-            type="area"
-            options={chartOptions}
-            series={chartSeries}
-            width="500"
-          />
-          <h3>
-            Total value: {'$' + finalTotalValue.toFixed(2)}
-          </h3>
-        </div>
+    <div className={styles.showResults}>
+      {
+        isLoading ? (
+          <div>
+            loading
+          </div>
+        )
+        : <>
+          
+          {(chartLoaded && chartOptions && chartSeries) ? 
+            <>
+            {/* note: still need to figure out proper way to do styles in next.js */}
+            <div className={styles.chartContainer} >
+              <Chart
+                type="area"
+                options={chartOptions}
+                series={chartSeries}
+              />
+            </div>
+            <h2>
+              Your portfolio's value today:
+            </h2>
+            <h3>
+              Total: {'$' + finalTotalValue.toFixed(2)}
+            </h3>
+            {
+              finalStockValues.map((data) => (
+                <h4>
+                  {data.symbol}: {`$${data.value.toFixed(2)}`}
+                </h4>
+              ))
+            }
+            </>
+          
+          : <div>
+              <button onClick={updateChart}>
+              Load chart
+              </button>
+            </div>
+                  
+          }
+        </>}
+      </div>
 
-      }
-      <button onClick={updateChart}>
-        Load chart
-      </button>
-    </div>
   );
 };
 
