@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import styles from '../styles/showResults.module.css';
 
@@ -33,8 +33,8 @@ const Chart = dynamic(() =>
   {ssr: false}
 );
 
-// Sample Data from the Marketstack API for stocks AAPL, GOOG, and MSFT
-const sampleData = require('../marketstack-eod-sample-data.json');
+// Sample Data from the TwelveData API for stocks AAPL, GOOG, and MSFT
+const sampleData = require('../twelve-data-sample-data.json');
 
 // Sample portfolio data for testing purposes
 const samplePortfolio = 
@@ -58,50 +58,15 @@ const samplePortfolio =
 }
 
 /*
-Format a date to be supplied to the date_from and/or date_to arguments
-of the Marketstack API's eod endpoint
+For a given Date object, create a string in the format
+YYYY-MM-DD,
+to supply to the Marketstack or Twelvedata APIs
 */
-function marketstackDateString(date) {
+function formatDateStr(date) {
   const y = date.getUTCFullYear().toString().padStart(4,'0');
   const m = date.getUTCMonth().toString().padStart(2, '0');
   const d = date.getUTCDate().toString().padStart(2, '0');
   return `${y}-${m}-${d}`;
-}
-
-/*
-Fetch stock data from the Marketstack API
-(To save on API calls, for now the function is configured to 
-instead use the sample data from marketstack-eod-sample-data.json)
-*/
-async function getStockData(symbols, startDate) {
-  const usingSampleData = true; // change this to use the actual API
-
-  if(usingSampleData)
-    return sampleData;
-
-  const apiKey = require('../api-keys.json')["marketstack"];
-  const requestURL = "http://api.marketstack.com/v1/eod"
-  + new URLSearchParams({
-    access_key: apiKey,
-    symbols: symbols.join(','),
-    date_from: marketstackDateString(new Date(startDate)),
-    date_to: marketstackDateString(new Date()),
-    sort: "ASC",
-    limit: 1000
-  });
-  const marketstackResponse = await fetch(requestURL);
-  //todo: handle error from api
-  const jsonData = await marketstackResponse.json();
-  return jsonData;
-}
-
-/*
-Get a stock investment's value at a given time, based on its current
-price, its price at the time of the investment, and the amount of
-money initially invested
-*/
-function getAssetValue(currentPrice, initialPrice, initialInvestment) {
-  return currentPrice * (initialInvestment / initialPrice);
 }
 
 /*
@@ -113,6 +78,9 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
   const [chartSeries, setChartSeries] = useState(null);
   const [finalTotalValue, setFinalTotalValue] = useState(0);
   const [finalStockValues, setFinalStockValues] = useState(new Map());
+  const [errMsg, setErrMsg] = useState("");
+
+  const rawStockData = useRef(null);
 
   const chartOptions = {
     chart: {
@@ -131,108 +99,176 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
     // https://apexcharts.com/javascript-chart-demos/bar-charts/custom-datalabels/
     dataLabels: {
       enabled: false,
-      // textAnchor: "start",
-      // formatter: function(val, opt) {
-      //   //console.log(opt);
-      //   return (opt.dataPointIndex == 0) ? opt.w.globals.seriesNames[opt.seriesIndex] : "";
-      // }
     },
-    // tooltip: {
-    //   shared: false,
-    //   intersect: false
-    // }
-
   };
 
-  async function updateChart() {
+  /*
+  Get stock data from the TwelveData API
+
+  NOTE: The Twelvedata support website indicates that all interday data is adjusted for splits:
+  https://support.twelvedata.com/en/articles/5179064-are-the-prices-adjusted
+  */
+  async function getRawStockData() {
+
+    if(rawStockData.current)
+      return rawStockData.current;
+
+    let useSampleData = true;
+    // useSampleData = false; // comment this line out for quick toggling
+
+    if(useSampleData) {
+      rawStockData.current = sampleData;
+      return sampleData;
+    }
+
+    const symbols = portfolio.assets.map((a) => a.symbol);
+
+    //const apiKey = "2a40d800b1f04ff89acb706ec4b7e674";
+    const apiKey = "f";
+    const requestURL = "https://api.twelvedata.com/time_series?"
+    + new URLSearchParams({
+      apikey: apiKey,
+      symbol: symbols.join(','),
+      interval: "1month",
+      date_from: formatDateStr(new Date(portfolio.startDate)),
+      date_to: formatDateStr(new Date()),
+      // sort: "ASC" // Seems to not work for some reason
+    });
+
+    const reqResponse = await fetch(requestURL);
+    if(reqResponse.status == 200) {
+      const jsonData = await reqResponse.json();
+      rawStockData.current = jsonData;
+      return jsonData;
+    }
+    else {
+      setErrMsg("Sorry, but something went wrong.");
+      return null;
+    }
+
+  }
+
+  /*
+  Update the chart, using the raw stock data
+  */
+  async function updateChartV2() {
     setIsLoading(true);
-    // Get the stock data from the Marketstack API
+
+    const stockData = await getRawStockData();
+    if(stockData === null)
+      return; //TODO: error handling
+
     const stockSymbols = portfolio.assets.map((asset) => asset.symbol);
-    const startDate = portfolio.startDate;
-    const stockData = await getStockData(stockSymbols, startDate);
-
-    const d = stockData["data"];
-
-    // Get the initial amount of money invested into each stock
-    const initialValues = new Map(
-      portfolio.assets.map((asset) => [asset.symbol, asset.portion * portfolio.initial])
-    );
 
     /*
-      For each stock, build an array to store its value over time
+    Ensure that data for all stocks in the portfolio was successfully retrieved
     */
-    const valueData = new Map(
-      stockSymbols.map((symbol) => [symbol, []])
-    );
+    stockSymbols.forEach((symbol) => {
+      if((!stockData[symbol]) || (stockData[symbol].status !== "ok")) {
+        setErrMsg("Sorry, but data could not be retrieved for every stock in your portfolio.");
+        return;
+      }
+    })
 
-    // Build an array to store the total value of the portfolio over time
-    let totalValue = [];
-
-    // Build an array to store the initial price of each stock
-    const initialPrices = new Map();
-    
     /*
-    Iterate through all stock data returned from the API
+    Get the number of shares purchased for each stock in the portfolio
     */
-    d.forEach((datum) => {
-      const date = datum.date;
-      const symbol = datum.symbol;
-      const closingPrice = datum.adj_close;
-
-      if(!initialPrices.has(symbol))
-        initialPrices.set(symbol, closingPrice);
-
-      const assetValue = getAssetValue(closingPrice, initialPrices.get(symbol), initialValues.get(symbol));
-
-      // const assetValue = closingPrice / initialPrices.get(symbol) * initialValues.get(symbol); // Asset's value on the given date
-
-      let v = valueData.get(symbol);
-      v.push({date: date, value: assetValue});
-      valueData.set(symbol, v);
-
-      /*
-      Update totalValue while ensuring that it remains sorted by date (ascending)
-      */
-      if((totalValue.length == 0) || (totalValue[totalValue.length-1].date != date))
-        totalValue.push({date: date, value: 0});
-      totalValue[totalValue.length-1].value += assetValue;
+    const sharesBought = new Map();
+    portfolio.assets.forEach((asset) => {
+      const assetData = stockData[asset.symbol].values;
+      const initialPrice = assetData[assetData.length - 1].close; // assume descending order
+      const amountInvested = asset.portion * portfolio.initial;
+      sharesBought.set(asset.symbol, amountInvested / initialPrice);
     });
 
+    //should we assume that if information on a given date is available for one stock, information will be available for every stock on that date?
 
-    // Update the chart
-    let newChartSeries = stockSymbols.map(symbol => {return {
-      name: symbol,
-      type: "area",
-      data: valueData.get(symbol).map((datum) => {return {
-        x: datum.date,
-        y: datum.value.toFixed(2)
-      }})
-    }});
-    newChartSeries.push({
-      name: "Total Value",
-      type: "area",
-      data: totalValue.map((datum) => {return {
-        x: datum.date,
-        y: datum.value.toFixed(2)
-      }})
+    /*
+    For each stock, record its value over time, in a format
+    that can be passed to the chart thing
+    */
+    const stockValuesByDate = new Map(
+      stockSymbols.map((symbol) => [symbol, new Map()])
+    );
+    const allDates = new Set(); // all dates for which data is available for at least one stock
+
+    stockSymbols.forEach((symbol) => {
+      stockData[symbol]["values"].forEach((tradingDay) => {
+        const date = tradingDay.datetime;
+        const closingPrice = tradingDay.close;
+        const assetValue = sharesBought.get(symbol) * closingPrice;
+        stockValuesByDate.get(symbol).set(date, assetValue); 
+
+        allDates.add(date);
+      })
     });
 
-    setChartSeries(newChartSeries);
+    /*
+    For each stock, as well as the total portfolio value over time, create a series of objects that can be supplied to the ApexCharts Chart component.
+    */
+    const seriesNames = stockSymbols.concat(["Total"]);
 
-    setFinalTotalValue(totalValue[totalValue.length-1].value);
+    let newChartSeries = {};
+    seriesNames.forEach((sName) => {
+      newChartSeries[sName] = {
+        name: sName,
+        type: "area",
+        data: []
+      };
+    });
+
+    // Sort the dates
+    const datesSorted = (Array.from(allDates));
+    datesSorted.sort((a,b)=>(new Date(a) - new Date(b)));
+    console.log(datesSorted);
+
+    /*
+    Calculate the total portfolio value over time
+    If data is unavailable for a given stock on a certain date,
+    assume that the stock's value was equal to its most recently known value
+    */
+    const currentValues = new Map(
+      stockSymbols.map((symbol) => [symbol, 0])
+    );
+    let portfolioValue = 0;
+
+    datesSorted.forEach((date) => {
+      stockSymbols.forEach((symbol) => {
+        if(stockValuesByDate.get(symbol).has(date)) {
+          const value = stockValuesByDate.get(symbol).get(date);
+          currentValues.set(symbol, value);
+          // Add new object for the chart series
+          newChartSeries[symbol].data.push({
+            x: date,
+            y: value.toFixed(2)
+          });
+        }
+      });
+      // Calculate the total portfolio value for the given date
+      portfolioValue = 0;
+      stockSymbols.forEach((symbol) => {
+        portfolioValue += currentValues.get(symbol);
+      });
+      newChartSeries["Total"].data.push({
+        x: date,
+        y: portfolioValue.toFixed(2)
+      });
+
+    });
+
+    setChartSeries(Array.from(seriesNames.map((sName) => newChartSeries[sName])));
     setFinalStockValues(stockSymbols.map((symbol) => {
-      const values = valueData.get(symbol);
       return {
         symbol: symbol,
-        value: values[values.length-1].value
-      };
+        value: currentValues.get(symbol)
+      }
     }));
+    setFinalTotalValue(portfolioValue);
 
     setChartLoaded(true);
     setIsLoading(false);
 
-
-  } 
+  }
 
   return (
     <div className={styles.showResults}>
@@ -270,7 +306,7 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
             </>
           
           : <div>
-              <button onClick={updateChart}>
+              <button onClick={updateChartV2}>
               Load chart
               </button>
             </div>
