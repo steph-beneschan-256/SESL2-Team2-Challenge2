@@ -58,18 +58,6 @@ const samplePortfolio =
 }
 
 /*
-For a given Date object, create a string in the format
-YYYY-MM-DD,
-to supply to the Marketstack or Twelvedata APIs
-*/
-function formatDateStr(date) {
-  const y = date.getUTCFullYear().toString().padStart(4,'0');
-  const m = date.getUTCMonth().toString().padStart(2, '0');
-  const d = date.getUTCDate().toString().padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-/*
 The ShowResults component
 */
 const ShowResults = ({ portfolio=samplePortfolio }) => {
@@ -82,6 +70,7 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
 
   const rawStockData = useRef(null);
 
+  // Chart display options
   const chartOptions = {
     chart: {
       width: "100%",
@@ -101,6 +90,18 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
       enabled: false,
     },
   };
+
+  /*
+  For a given Date object, create a string in the format
+  YYYY-MM-DD,
+  to supply to the Marketstack or Twelvedata APIs
+  */
+  function formatDateStr(date) {
+    const y = date.getUTCFullYear().toString().padStart(4,'0');
+    const m = date.getUTCMonth().toString().padStart(2, '0');
+    const d = date.getUTCDate().toString().padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
 
   /*
   Get stock data from the TwelveData API
@@ -151,7 +152,7 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
   /*
   Update the chart, using the raw stock data
   */
-  async function updateChartV2() {
+  async function updateChart() {
     setIsLoading(true);
 
     const stockData = await getRawStockData();
@@ -186,77 +187,84 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
     /*
     For each stock, record its value over time, in a format
     that can be passed to the chart thing
+
+    maybe ignore total for now???
     */
-    const stockValuesByDate = new Map(
-      stockSymbols.map((symbol) => [symbol, new Map()])
-    );
-    const allDates = new Set(); // all dates for which data is available for at least one stock
+
+    let newChartSeries = [];
+
+    /*
+    For every date on which data is available for at least one stock, record what stocks changed on that day and what their new values were afterwards. (This will be used to find the total portfolio's value over time.)
+    */
+    const valuesByDate = new Map();
 
     stockSymbols.forEach((symbol) => {
-      stockData[symbol]["values"].forEach((tradingDay) => {
-        const date = tradingDay.datetime;
-        const closingPrice = tradingDay.close;
-        const assetValue = sharesBought.get(symbol) * closingPrice;
-        stockValuesByDate.get(symbol).set(date, assetValue); 
+      newChartSeries.push(
+        {
+          name: symbol,
+          type: "area",
+          data: 
+            stockData[symbol]["values"].map((tradingDay) => {
+              const date = tradingDay.datetime;
+              const closingPrice = tradingDay.close;
+              const assetValue = sharesBought.get(symbol) * closingPrice;
 
-        allDates.add(date);
-      })
-    });
-
-    /*
-    For each stock, as well as the total portfolio value over time, create a series of objects that can be supplied to the ApexCharts Chart component.
-    */
-    const seriesNames = stockSymbols.concat(["Total"]);
-
-    let newChartSeries = {};
-    seriesNames.forEach((sName) => {
-      newChartSeries[sName] = {
-        name: sName,
-        type: "area",
-        data: []
-      };
-    });
-
-    // Sort the dates
-    const datesSorted = (Array.from(allDates));
-    datesSorted.sort((a,b)=>(new Date(a) - new Date(b)));
-    console.log(datesSorted);
-
-    /*
-    Calculate the total portfolio value over time
-    If data is unavailable for a given stock on a certain date,
-    assume that the stock's value was equal to its most recently known value
-    */
-    const currentValues = new Map(
-      stockSymbols.map((symbol) => [symbol, 0])
-    );
-    let portfolioValue = 0;
-
-    datesSorted.forEach((date) => {
-      stockSymbols.forEach((symbol) => {
-        if(stockValuesByDate.get(symbol).has(date)) {
-          const value = stockValuesByDate.get(symbol).get(date);
-          currentValues.set(symbol, value);
-          // Add new object for the chart series
-          newChartSeries[symbol].data.push({
-            x: date,
-            y: value.toFixed(2)
-          });
+              const v = [[symbol, assetValue]];
+              if(!valuesByDate.has(date))
+                valuesByDate.set(date, v);
+              else
+                valuesByDate.set(date, valuesByDate.get(date).concat(v));
+    
+              return {
+                x: date,
+                y: assetValue.toFixed(2)
+              };
+            })
+          
         }
-      });
-      // Calculate the total portfolio value for the given date
-      portfolioValue = 0;
-      stockSymbols.forEach((symbol) => {
-        portfolioValue += currentValues.get(symbol);
-      });
-      newChartSeries["Total"].data.push({
-        x: date,
-        y: portfolioValue.toFixed(2)
-      });
-
+      )
     });
 
-    setChartSeries(Array.from(seriesNames.map((sName) => newChartSeries[sName])));
+    // Estimate total portfolio value over time
+    const totalValueSeries = [];
+
+    // Convert date strings to date objects, to enable sorting
+    const allDates = Array.from(valuesByDate.keys());
+    allDates.sort((a,b) => (new Date(a) - new Date(b)));
+
+    /*
+      If a particular stock's price isn't available for a given day, assume that
+      its price was the same as its previous price, for the purposes of calculating
+      the total portfolio value for that day.
+    */
+    const currentValues = new Map();
+    portfolio.assets.forEach((asset) => {
+      currentValues.set(asset.symbol, 0);
+    })
+    let portfolioValue = portfolio.initial;
+    allDates.forEach((date) => {
+      valuesByDate.get(date).forEach(([symbol, newValue]) => {
+        currentValues.set(symbol, newValue);
+      })
+      portfolioValue = Array.from(currentValues.values()).reduce(
+        (accumulator, currValue) => (accumulator + currValue), 0);
+      
+      totalValueSeries.push({
+        x: date,
+        y: portfolioValue
+      });
+  
+    })
+    
+    newChartSeries.push({
+      name: "Total",
+      type: "area",
+      data: totalValueSeries
+    });
+
+    // Finally, update states
+
+    setChartSeries(newChartSeries);
     setFinalStockValues(stockSymbols.map((symbol) => {
       return {
         symbol: symbol,
@@ -264,7 +272,6 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
       }
     }));
     setFinalTotalValue(portfolioValue);
-
     setChartLoaded(true);
     setIsLoading(false);
 
@@ -306,7 +313,7 @@ const ShowResults = ({ portfolio=samplePortfolio }) => {
             </>
           
           : <div>
-              <button onClick={updateChartV2}>
+              <button onClick={updateChart}>
               Load chart
               </button>
             </div>
